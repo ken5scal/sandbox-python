@@ -5,12 +5,17 @@ import re
 import time
 from datetime import timedelta
 from typing import Any
-
 from dotenv import load_dotenv
+from add_document import initialize_vectorstore
+
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.chat_models import ChatOpenAI
 from langchain.memory import MomentoChatMessageHistory
 from langchain.schema import HumanMessage, LLMResult, SystemMessage
+# from langchain.chains import RetrievalQA
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+
 from slack_bolt import App
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -84,25 +89,24 @@ def handle_mention(event, say):
     thread_ts = event["ts"]
     message = re.sub("<@.*>", "", event["text"])
 
-    # 投稿のキー(=Momentoキー)：初回=event["ts"],2回目以降=event["thread_ts"]
+    # 投稿の戦闘(=Momento key)を示す: 初回はevent["ts"], 2回目以降はevent["thread_ts"]
     id_ts = event["ts"]
     if "thread_ts" in event:
         id_ts = event["thread_ts"]
-
+    
     result = say("\n\nTyping...", thread_ts=thread_ts)
     ts = result["ts"]
 
     history = MomentoChatMessageHistory.from_client_params(
-        id_ts,
+        id_ts, 
         os.environ["MOMENTO_CACHE"],
         timedelta(hours=int(os.environ["MOMENTO_TTL"])),
     )
+    memory = ConversationBufferMemory(
+        chat_memory=history, memory_key="chat_history", return_messages=True
+    )
 
-    messages = [SystemMessage(content="You are a good assistant.")]
-    messages.extend(history.messages)
-    messages.append(HumanMessage(content=message))
-
-    history.add_user_message(message)
+    vectorstore = initialize_vectorstore()
 
     callback = SlackStreamingCallbackHandler(channel=channel, ts=ts)
     llm = ChatOpenAI(
@@ -111,10 +115,53 @@ def handle_mention(event, say):
         streaming=True,
         callbacks=[callback],
     )
+    condense_question_llm = ChatOpenAI(
+        model_name=os.environ["OPENAI_API_MODEL"],
+        temperature=os.environ["OPENAI_API_TEMPERATURE"],
+    )
 
-    ai_message = llm(messages)
-    history.add_message(ai_message)
+    # qa_chain = RetrievalQA.from_llm(llm=llm, retriever=vectorstore.as_retriever())
+    qa_chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=vectorstore.as_retriever(),
+        memory=memory,
+        condense_question_llm=condense_question_llm,
+    )
+    qa_chain.run(message)
+    # channel = event["channel"]
+    # thread_ts = event["ts"]
+    # message = re.sub("<@.*>", "", event["text"])
 
+    # # 投稿のキー(=Momentoキー)：初回=event["ts"],2回目以降=event["thread_ts"]
+    # id_ts = event["ts"]
+    # if "thread_ts" in event:
+    #     id_ts = event["thread_ts"]
+
+    # result = say("\n\nTyping...", thread_ts=thread_ts)
+    # ts = result["ts"]
+
+    # history = MomentoChatMessageHistory.from_client_params(
+    #     id_ts,
+    #     os.environ["MOMENTO_CACHE"],
+    #     timedelta(hours=int(os.environ["MOMENTO_TTL"])),
+    # )
+
+    # messages = [SystemMessage(content="You are a good assistant.")]
+    # messages.extend(history.messages)
+    # messages.append(HumanMessage(content=message))
+
+    # history.add_user_message(message)
+
+    # callback = SlackStreamingCallbackHandler(channel=channel, ts=ts)
+    # llm = ChatOpenAI(
+    #     model_name=os.environ["OPENAI_API_MODEL"],
+    #     temperature=os.environ["OPENAI_API_TEMPERATURE"],
+    #     streaming=True,
+    #     callbacks=[callback],
+    # )
+
+    # ai_message = llm(messages)
+    # history.add_message(ai_message)
 
 def just_ack(ack):
     ack()
@@ -140,3 +187,29 @@ def handler(event, context):
     slack_handler = SlackRequestHandler(app=app)
     # 応答はそのまま AWS Lambda の戻り値として返せます
     return slack_handler.handle(event, context)
+
+# def handle_mention(event, say):
+    # channel = event["channel"]
+    # thread_ts = event["ts"]
+    # message = re.sub("<@.*>", "", event["text"])
+
+    # # 投稿の戦闘(=Momento key)を示す: 初回はevent["ts"], 2回目以降はevent["thread_ts"]
+    # id_ts = event["ts"]
+    # if "thread_ts" in event:
+    #     id_ts = event["thread_ts"]
+    
+    # result = say("\n\nTyping...", thread_ts=thread_ts)
+    # ts = result["ts"]
+
+    # vectorstore = initialize_vectorstore()
+
+    # callback = SlackStreamingCallbackHandler(channel=channel, ts=ts)
+    # llm = ChatOpenAI(
+    #     model_name=os.environ["OPENAI_API_MODEL"],
+    #     temperature=os.environ["OPENAI_API_TEMPERATURE"],
+    #     streaming=True,
+    #     callbacks=[callback],
+    # )
+
+    # qa_chain = RetrievalQA.from_llm(llm=llm, retriever=vectorstore.as_retriever())
+    # qa_chain.run(message)
